@@ -71,12 +71,21 @@ const SVG={mail:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 6 
 const icon=k=>`<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${SVG[k]}</svg>`;
 const $=id=>document.getElementById(id), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const normalizeFiles=p=>{p.files=p.files||{};for(const key of [...allKeys(),'email','reference']){const v=p.files[key];if(v&&!Array.isArray(v))p.files[key]=[v];}if(p.files.email?.length&&!p.files.air_email?.length)p.files.air_email=p.files.email.map((f,i)=>({...f,legacyKey:'email',legacyIndex:i}));if(p.files.reference?.length&&!p.files.air_reference?.length)p.files.air_reference=p.files.reference.map((f,i)=>({...f,legacyKey:'reference',legacyIndex:i}));return p};
-const DBNAME='itc-project-documents-demo',STORE='files';let projects=[],editing=null,db;
-function openDB(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DBNAME,1);req.onupgradeneeded=()=>req.result.createObjectStore(STORE);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error)})}
-function dbGet(key){return new Promise((resolve,reject)=>{const r=db.transaction(STORE,'readonly').objectStore(STORE).get(key);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
-function dbPut(key,value){return new Promise((resolve,reject)=>{const r=db.transaction(STORE,'readwrite').objectStore(STORE).put(value,key);r.onsuccess=()=>resolve();r.onerror=()=>reject(r.error)})}
-function dbDel(key){return new Promise((resolve,reject)=>{const r=db.transaction(STORE,'readwrite').objectStore(STORE).delete(key);r.onsuccess=()=>resolve();r.onerror=()=>reject(r.error)})}
-function persist(){localStorage.setItem('itc-project-document-metadata-v1',JSON.stringify(projects))}
+// Configure the API URL after the Worker is secured and deployed.
+const API_BASE='https://al-futtaim-documents-api.itcbangkok1969.workers.dev';
+let projects=[],editing=null;
+async function api(path,options={}){
+ const r=await fetch(API_BASE+path,{...options,credentials:'include',headers:{...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(options.headers||{})}});
+ let data;const ct=r.headers.get('content-type')||'';
+ if(ct.includes('application/json'))data=await r.json();else data={error:'Unexpected server response ('+r.status+')'};
+ if(!r.ok)throw Error(data.error||'API request failed ('+r.status+')');return data;
+}
+async function refreshProjects(){
+ const data=await api('/projects');const byId=new Map();
+ for(const row of data.projects||[])byId.set(row.id,{id:row.id,project:row.project,company:row.company,departure:row.departure,returnDate:row.return_date,files:{}});
+ for(const f of data.files||[]){const p=byId.get(f.project_id);if(!p)continue;(p.files[f.document_key]??=[]).push({id:f.id,name:f.file_name,size:f.file_size,type:f.mime_type});}
+ projects=[...byId.values()];render();
+}
 function complete(p){return !!(p.project&&p.departure&&p.returnDate&&DOCS.every(d=>d.key==='po'?!!p.files?.po?.length:SECTIONS.every(section=>!!p.files?.[subKey(d.key,section.key)]?.length)))}
 function show(view){$('dashboard').classList.toggle('hidden',view!=='dashboard');$('register').classList.toggle('hidden',view!=='register');$('navDash').classList.toggle('active',view==='dashboard');$('navRegister').classList.toggle('active',view==='register');if(view==='dashboard')render();window.scrollTo(0,0)}
 function filePicker(p,key){const fs=p.files?.[key]||[];if(!fs.length)return '';return `<div class="file-picker"><button type="button" class="docview" data-file-toggle aria-expanded="false" aria-label="Choose a file to view">View ▾</button><div class="file-menu" hidden>${fs.map((f,i)=>`<button type="button" data-view-project="${esc(p.id)}" data-view-doc="${esc(key)}" data-view-index="${i}" title="${esc(f.name||`File ${i+1}`)}">${esc(f.name||`File ${i+1}`)}</button>`).join('')}</div></div>`}
@@ -105,12 +114,52 @@ const fileKey=(id,key,index)=>id+':'+key+(index===0?'':':'+index);
 function uploadSlot(p,key,label,hint){const existing=p?.files?.[key]||[];return `<div class="uploadslot"><label for="file-${key}" class="slotlabel">${esc(label)}</label><div class="slotnote">${esc(hint)} · Multiple files allowed</div><input type="file" id="file-${key}" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx,.eml,.msg"><div class="fileinfo" id="info-${key}"><div class="filelist">${existing.map((f,i)=>`<div class="fileentry"><span>✓ ${esc(f.name)}</span><span><button type="button" data-open="${key}" data-index="${i}">View</button><button type="button" data-remove="${key}" data-index="${i}">Remove</button></span></div>`).join('')||'<span style="color:var(--muted)">N/A · No file uploaded</span>'}</div></div></div>`}
 function filesHtml(p,d){const slots=d.key==='po'?uploadSlot(p,d.key,'PO','Upload Document'):SECTIONS.map(section=>uploadSlot(p,subKey(d.key,section.key),section.name,'Upload '+section.name)).join('');return `<div class="upload"><div class="uploadtop"><span class="ico">${icon(d.icon)}</span><div><strong>${d.name}</strong><small>${d.key==='po'?'Multiple files allowed':'Email Request · Reference'}</small></div></div><div class="uploadslots">${slots}</div></div>`}
 function newProject(id=null){removed.clear();stagedFiles.clear();editing=id;const p=projects.find(x=>x.id===id);$('projectForm').reset();$('project').value=p?.project||'';$('company').value=p?.company||'';$('departure').value=p?.departure||'';$('returnDate').value=p?.returnDate||'';$('formTitle').textContent=p?'Edit Project':'New Project';$('uploads').innerHTML=DOCS.map(d=>filesHtml(p,d)).join('');show('register')}
-async function openFile(id,key,index,meta){const preview=/^(application\/pdf|image\/)/.test(meta?.type||'')||/\.(pdf|png|jpe?g|webp)$/i.test(meta?.name||'');const tab=preview?window.open('','_blank'):null;try{let f=await dbGet(fileKey(id,meta?.legacyKey||key,meta?.legacyIndex??index));if(!f&&index===0)f=await dbGet(id+':'+(meta?.legacyKey||key));if(!f)throw Error('File not found in this browser.');const url=URL.createObjectURL(f);if(preview&&tab){tab.location.href=url;setTimeout(()=>URL.revokeObjectURL(url),120000)}else{if(tab)tab.close();const a=document.createElement('a');a.href=url;a.download=meta?.name||'document';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000)}}catch(err){if(tab)tab.close();alert('Unable to open document: '+err.message)}}
-$('projectForm').addEventListener('submit',async e=>{e.preventDefault();const name=$('project').value.trim(),company=$('company').value,departure=$('departure').value,returnDate=$('returnDate').value;if(!name||!company||!departure||!returnDate)return alert('Please complete Project, Company and travel dates.');if(returnDate<departure)return alert('Return Date cannot be before Departure Date.');$('save').disabled=true;try{const old=projects.find(p=>p.id===editing),id=old?.id||crypto.randomUUID(),files={...(old?.files||{})};for(const key of allKeys()){const original=old?.files?.[key]||[],toRemove=removed.get(key)||new Set(),kept=[];for(let i=0;i<original.length;i++){if(toRemove.has(i)){await dbDel(fileKey(id,key,i));continue}const blob=await dbGet(fileKey(id,original[i].legacyKey||key,original[i].legacyIndex??i));if(!blob)throw Error('Missing stored file: '+original[i].name);kept.push({meta:original[i],blob})}for(const f of (stagedFiles.get(key)||[...$('file-'+key).files])){if(f.size>15*1024*1024)throw Error(key+': maximum file size is 15 MB per file.');kept.push({meta:{name:f.name,size:f.size,type:f.type},blob:f})}for(let i=0;i<original.length;i++)await dbDel(fileKey(id,key,i));for(let i=0;i<kept.length;i++)await dbPut(fileKey(id,key,i),kept[i].blob);files[key]=kept.map(x=>({name:x.meta.name,size:x.meta.size,type:x.meta.type}))}const obj={id,project:name,company,departure,returnDate,files};if(old)projects=projects.map(p=>p.id===id?obj:p);else projects.unshift(obj);persist();removed.clear();stagedFiles.clear();show('dashboard')}catch(err){alert('Unable to save: '+err.message)}finally{$('save').disabled=false}});
+async function openFile(id,key,index,meta){
+ if(!meta?.id)return alert('Document reference is missing.');
+ const preview=/^(application\/pdf|image\/)/.test(meta.type||'')||/\.(pdf|png|jpe?g|webp)$/i.test(meta.name||'');
+ const tab=preview?window.open('','_blank'):null;
+ try{
+  const response=await fetch(API_BASE+'/files/'+encodeURIComponent(meta.id),{credentials:'include'});
+  if(!response.ok)throw Error('Unable to retrieve file ('+response.status+')');
+  const blob=await response.blob(),url=URL.createObjectURL(blob);
+  if(preview&&tab){tab.location.href=url;setTimeout(()=>URL.revokeObjectURL(url),120000)}
+  else{if(tab)tab.close();const a=document.createElement('a');a.href=url;a.download=meta.name||'document';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000)}
+ }catch(err){if(tab)tab.close();alert('Unable to open document: '+err.message)}
+}
+$('projectForm').addEventListener('submit',async e=>{
+ e.preventDefault();const name=$('project').value.trim(),company=$('company').value,departure=$('departure').value,returnDate=$('returnDate').value;
+ if(!name||!company||!departure||!returnDate)return alert('Please complete Project, Company and travel dates.');
+ if(returnDate<departure)return alert('Return Date cannot be before Departure Date.');
+ $('save').disabled=true;let id=editing;
+ try{
+  const payload={project:name,company,departure,return_date:returnDate};
+  if(id)await api('/projects/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify(payload)});
+  else{const created=await api('/projects',{method:'POST',body:JSON.stringify(payload)});id=created.project?.id;if(!id)throw Error('Project was created but no ID was returned. Refresh the dashboard.');}
+  const old=projects.find(p=>p.id===editing);
+  for(const key of allKeys()){
+   const existing=old?.files?.[key]||[],toRemove=removed.get(key)||new Set();
+   for(const i of toRemove){const f=existing[i];if(f?.id)await api('/files/'+encodeURIComponent(f.id),{method:'DELETE'});}
+   for(const f of (stagedFiles.get(key)||[])){
+    if(!f.size||f.size>15*1024*1024)throw Error(key+': maximum file size is 15 MB per file.');
+    const form=new FormData();form.append('document_key',key);form.append('file',f,f.name);
+    await api('/projects/'+encodeURIComponent(id)+'/files',{method:'POST',body:form});
+   }
+  }
+  removed.clear();stagedFiles.clear();await refreshProjects();show('dashboard');
+ }catch(err){alert('Unable to save: '+err.message+'\nAny successful changes are already stored. Please refresh before retrying.');try{await refreshProjects()}catch{}}
+ finally{$('save').disabled=false}
+});
 $('uploads').addEventListener('click',e=>{const rm=e.target.closest('[data-remove]'),op=e.target.closest('[data-open]');if(rm){const key=rm.dataset.remove,index=Number(rm.dataset.index);if(!removed.has(key))removed.set(key,new Set());removed.get(key).add(index);rm.closest('.fileentry').remove();}if(op){const p=projects.find(x=>x.id===editing),key=op.dataset.open,index=Number(op.dataset.index);if(p)openFile(p.id,key,index,p.files?.[key]?.[index])}});
 $('uploads').addEventListener('change',e=>{if(e.target.type==='file'){const key=e.target.id.replace('file-',''),fs=[...(stagedFiles.get(key)||[]),...e.target.files];stagedFiles.set(key,fs);const list=$('info-'+key).querySelector('.filelist');const pending=list.querySelector('span[style]');if(pending)pending.remove();list.querySelectorAll('.ready').forEach(n=>n.remove());for(const f of fs){const div=document.createElement('div');div.className='fileentry ready';div.textContent='✓ '+f.name+' (ready to save)';list.appendChild(div)}}});
-$('projectRows').addEventListener('click',async e=>{const toggle=e.target.closest('[data-file-toggle]');if(toggle){const menu=toggle.nextElementSibling,wasOpen=!menu.hidden;document.querySelectorAll('#projectRows .file-menu').forEach(m=>m.hidden=true);document.querySelectorAll('#projectRows [data-file-toggle]').forEach(b=>b.setAttribute('aria-expanded','false'));menu.hidden=wasOpen;toggle.setAttribute('aria-expanded',String(!wasOpen));return}const view=e.target.closest('[data-view-doc]'),edit=e.target.closest('[data-edit]'),del=e.target.closest('[data-delete]');if(view){view.closest('.file-menu').hidden=true;const p=projects.find(x=>x.id===view.dataset.viewProject),key=view.dataset.viewDoc,index=Number(view.dataset.viewIndex);if(p)await openFile(p.id,key,index,p.files?.[key]?.[index]);return}if(edit){removed.clear();newProject(edit.dataset.edit)}if(del){const p=projects.find(x=>x.id===del.dataset.delete);if(!p||!confirm('Delete project “'+p.project+'” and its files from this browser?'))return;for(const key of [...new Set([...allKeys(),...legacyKeys,'email','reference'])])for(let i=0;i<(p.files?.[key]||[]).length;i++)await dbDel(fileKey(p.id,key,i));projects=projects.filter(x=>x.id!==p.id);persist();render()}});
+$('projectRows').addEventListener('click',async e=>{
+ const toggle=e.target.closest('[data-file-toggle]');
+ if(toggle){const menu=toggle.nextElementSibling,wasOpen=!menu.hidden;document.querySelectorAll('#projectRows .file-menu').forEach(m=>m.hidden=true);document.querySelectorAll('#projectRows [data-file-toggle]').forEach(b=>b.setAttribute('aria-expanded','false'));menu.hidden=wasOpen;toggle.setAttribute('aria-expanded',String(!wasOpen));return}
+ const view=e.target.closest('[data-view-doc]'),edit=e.target.closest('[data-edit]'),del=e.target.closest('[data-delete]');
+ if(view){view.closest('.file-menu').hidden=true;const p=projects.find(x=>x.id===view.dataset.viewProject),key=view.dataset.viewDoc,index=Number(view.dataset.viewIndex);if(p)await openFile(p.id,key,index,p.files?.[key]?.[index]);return}
+ if(edit){newProject(edit.dataset.edit)}
+ if(del){const p=projects.find(x=>x.id===del.dataset.delete);if(!p||!confirm('Delete project “'+p.project+'” and all its files from the shared database?'))return;try{await api('/projects/'+encodeURIComponent(p.id),{method:'DELETE'});await refreshProjects()}catch(err){alert('Unable to delete project: '+err.message)}}
+});
 document.addEventListener('click',e=>{if(!e.target.closest('.file-picker'))document.querySelectorAll('#projectRows .file-menu').forEach(m=>m.hidden=true)});$('addTop').onclick=()=>{removed.clear();newProject()};$('navRegister').onclick=()=>{removed.clear();newProject()};$('navDash').onclick=()=>{removed.clear();stagedFiles.clear();show('dashboard')};$('search').oninput=render;$('monthFilter').onchange=render;$('companyFilter').onchange=render;$('poFilter').onchange=render;
 for(const el of document.querySelectorAll('.dochead'))el.insertAdjacentHTML('afterbegin',icon(el.dataset.icon));
-(async()=>{try{db=await openDB();projects=JSON.parse(localStorage.getItem('itc-project-document-metadata-v1')||'[]');if(!Array.isArray(projects))projects=[];projects=projects.map(normalizeFiles);removed.clear();newProject()}catch(e){alert('This browser does not support local file storage: '+e.message)}})();
+(async()=>{try{await refreshProjects();newProject()}catch(e){newProject();const msg=document.createElement('div');msg.className='notice';msg.style.margin='15px auto';msg.style.maxWidth='920px';msg.textContent='Shared database connection unavailable: '+e.message+'. No local data has been deleted. Please verify the Worker API configuration.';document.querySelector('#register .formwrap').prepend(msg)}})();
 </script></body></html>
